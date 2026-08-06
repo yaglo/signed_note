@@ -36,6 +36,7 @@ defmodule SignedNote.Error do
 
     * `:invalid_text` — text is empty, unterminated, or has forbidden characters
     * `:no_signers` — no signer was supplied
+    * `:invalid_timestamp` — a timestamped signature's time is not in `0..2^63 - 1`
 
   Keys:
 
@@ -43,6 +44,7 @@ defmodule SignedNote.Error do
     * `:invalid_key_encoding` — malformed vkey or private key string
     * `:key_id_mismatch` — the encoded key ID is not the one the key derives
     * `:unsupported_algorithm` — a signature type this library does not implement
+    * `:public_key_required` — the public key cannot be derived and was not supplied
 
   Checkpoints:
 
@@ -57,9 +59,11 @@ defmodule SignedNote.Error do
           | :ambiguous_verifier
           | :invalid_text
           | :no_signers
+          | :invalid_timestamp
           | :invalid_key_name
           | :invalid_key_encoding
           | :key_id_mismatch
+          | :public_key_required
           | :unsupported_algorithm
           | :invalid_checkpoint
 

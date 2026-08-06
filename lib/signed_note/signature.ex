@@ -6,17 +6,23 @@ defmodule SignedNote.Signature do
 
   The em dash is U+2014. The base64 blob decodes to the 4-byte big-endian
   key ID followed by the algorithm-specific signature bytes.
+
+  A line names its key but not its signature type, so what those bytes
+  mean is known only once a verifier claims the line. `:timestamp` is
+  therefore filled in by `SignedNote.open/2`, and only for a signature
+  that verified under one of the timestamped types.
   """
 
   alias SignedNote.KeyName
 
   @enforce_keys [:name, :key_id, :signature]
-  defstruct [:name, :key_id, :signature]
+  defstruct [:name, :key_id, :signature, :timestamp]
 
   @type t :: %__MODULE__{
           name: String.t(),
           key_id: <<_::4*8>>,
-          signature: binary()
+          signature: binary(),
+          timestamp: integer() | nil
         }
 
   @doc false

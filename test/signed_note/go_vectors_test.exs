@@ -14,6 +14,23 @@ defmodule SignedNote.GoVectorsTest do
   @peter_sig "— PeterNeumann x08go/ZJkuBS9UG/SffcvIAQxVBtiFupLLr8pAcElZInNIuGUgYN1FFYC2pZSNXgKvqfqdngotpRZb6KE6RyyBwJnAM=\n"
   @note @text <> "\n" <> @peter_sig
 
+  # Notes signed by github.com/transparency-dev/formats/note — the
+  # implementation the specification names for ECDSA, and the one that
+  # implements the cosignature and RFC 6962 types — captured once so the
+  # other four signature types are pinned to reference output without
+  # needing Go in the loop. Regenerate with test/support/noteref.
+  @typed_vectors Path.expand("../support/vectors/typed_notes.tsv", __DIR__)
+  @external_resource @typed_vectors
+
+  @typed_cases @typed_vectors
+               |> File.read!()
+               |> String.split("\n", trim: true)
+               |> Enum.reject(&String.starts_with?(&1, "#"))
+               |> Enum.map(fn line ->
+                 [type, vkey, note_b64] = String.split(line, "\t")
+                 {type, vkey, Base.decode64!(note_b64)}
+               end)
+
   defp verifier do
     {:ok, verifier} = SignedNote.Verifier.from_string(@vkey)
     verifier
@@ -110,5 +127,54 @@ defmodule SignedNote.GoVectorsTest do
 
     assert {:error, %SignedNote.Error{reason: :too_many_signatures}} =
              SignedNote.open(note_101, [verifier()])
+  end
+
+  describe "reference notes for the other signature types" do
+    test "all four vectors are present" do
+      assert Enum.map(@typed_cases, &elem(&1, 0)) == ~w(ecdsa cosigv1 rfc6962 rfc6962rsa mldsa)
+    end
+
+    for {type, vkey, note} <- @typed_cases do
+      test "#{type}: the reference vkey parses and its note verifies" do
+        vkey = unquote(vkey)
+        note = unquote(note)
+
+        assert {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
+        # from_string/1 recomputes the key ID from the name and key, so
+        # parsing at all is agreement with the reference on the derivation.
+        assert SignedNote.Verifier.to_string(verifier) == vkey
+
+        assert {:ok, opened} = SignedNote.open(note, [verifier])
+        assert opened.verified_names == [verifier.name]
+
+        assert opened.text ==
+                 "#{verifier.name}\n42\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
+      end
+
+      test "#{type}: a one-byte change to the reference note is rejected" do
+        vkey = unquote(vkey)
+        note = unquote(note)
+        {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
+
+        assert {:error, %SignedNote.Error{reason: :signature_invalid}} =
+                 SignedNote.open(String.replace(note, "\n42\n", "\n43\n"), [verifier])
+      end
+    end
+
+    test "the timestamped types carry the timestamp the reference stamped" do
+      for {type, vkey, note} <- @typed_cases, type in ~w(cosigv1 rfc6962 rfc6962rsa mldsa) do
+        {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
+        {:ok, opened} = SignedNote.open(note, [verifier])
+        [signature] = opened.signatures
+
+        # The reference cosignature signer stamps the current time; only
+        # the RFC 6962 path takes the timestamp the driver was given.
+        if type in ~w(rfc6962 rfc6962rsa) do
+          assert signature.timestamp == 1_679_315_147
+        else
+          assert is_integer(signature.timestamp) and signature.timestamp > 1_600_000_000
+        end
+      end
+    end
   end
 end

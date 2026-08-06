@@ -2,7 +2,10 @@ defmodule SignedNoteTest do
   use ExUnit.Case, async: true
   doctest SignedNote
   doctest SignedNote.Verifier
+  doctest SignedNote.Signer
+  doctest SignedNote.SignatureType
   doctest SignedNote.Checkpoint
+  doctest SignedNote.Subtree
 
   # The worked example from the C2SP signed-note specification.
   @spec_vkey "example.com/foo+530d903a+AekyeRrm56hApGFkyQR4ZCbV54Id2LKaANYcrnKv3U2k"
@@ -210,15 +213,28 @@ defmodule SignedNoteTest do
       assert error.reason == :key_id_mismatch
     end
 
-    test "unsupported signature types are rejected with the type named" do
-      material = Base.encode64(<<0x02, :crypto.strong_rand_bytes(33)::binary>>)
+    test "reserved and unassigned signature types are rejected with the type named" do
       id = Base.encode16(<<1, 2, 3, 4>>, case: :lower)
+
+      for {byte, hex} <- [{0x00, "0x00"}, {0x03, "0x03"}, {0xFA, "0xfa"}, {0xFF, "0xff"}] do
+        material = Base.encode64(<<byte, :crypto.strong_rand_bytes(32)::binary>>)
+
+        assert {:error, error} =
+                 SignedNote.Verifier.from_string("k.example/a+" <> id <> "+" <> material)
+
+        assert error.reason == :unsupported_algorithm
+        assert error.message =~ hex
+      end
+    end
+
+    test "an assigned type with key material of the wrong shape is a bad key, not a bad type" do
+      id = Base.encode16(<<1, 2, 3, 4>>, case: :lower)
+      material = Base.encode64(<<0x02, :crypto.strong_rand_bytes(33)::binary>>)
 
       assert {:error, error} =
                SignedNote.Verifier.from_string("k.example/a+" <> id <> "+" <> material)
 
-      assert error.reason == :unsupported_algorithm
-      assert error.message =~ "0x02"
+      assert error.reason == :invalid_key_encoding
     end
 
     test "malformed vkeys" do

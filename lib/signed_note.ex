@@ -38,10 +38,32 @@ defmodule SignedNote do
 
   ## Scope
 
-  Ed25519 (signature type `0x01`) is the only implemented algorithm, per
-  the spec's guidance that implementations support only the types their
-  design requires. Verifier keys use the C2SP vkey encoding
-  (`SignedNote.Verifier`).
+  Every signature type the spec assigns a format to is implemented, for
+  both verification and signing — Ed25519 (`0x01`), ECDSA (`0x02`),
+  Ed25519 witness cosignatures (`0x04`), RFC 6962 tree head signatures
+  (`0x05`), and ML-DSA-44 cosignatures (`0x06`). See
+  `SignedNote.SignatureType`. The spec suggests supporting only the types
+  a design requires; a caller narrows the set by choosing which verifiers
+  it passes to `open/2`, since a signature no verifier names is ignored.
+
+  Three of those types sign a message derived from the note text rather
+  than the text itself, and carry a timestamp inside the signature. For
+  those, `sign/3` stamps the current time unless given one, and `open/2`
+  reports the signed timestamp on the `SignedNote.Signature` that carried
+  it. `0x05` and `0x06` additionally require the text to be a checkpoint
+  (`SignedNote.Checkpoint`), because that is what they sign.
+
+  `0x06` also signs ranges of a log's leaves that no note can express;
+  see `SignedNote.Subtree`.
+
+  Verifier keys use the C2SP vkey encoding (`SignedNote.Verifier`).
+
+  ## What is not here
+
+  A note carries a log's claims but never checks them against a tree: this
+  library computes no Merkle hashes, so tlog-checkpoint's requirement that
+  a log never sign a checkpoint inconsistent with an earlier one rests
+  with the caller of `sign/3`.
 
   ## Requirements
 
@@ -55,7 +77,7 @@ defmodule SignedNote do
     raise "signed_note requires Erlang/OTP 29 or later (found OTP #{otp_release})"
   end
 
-  alias SignedNote.{Error, Signature, Signer, Verifier}
+  alias SignedNote.{Algorithm, Error, Signature, SignatureType, Signer, Verifier}
 
   # The spec requires verifiers to accept at least 16 signatures per note
   # and recommends a limit. 100 matches the reference implementation
@@ -107,6 +129,11 @@ defmodule SignedNote do
   other than newline, and must end with a newline. Signature lines are
   appended in the given signer order.
 
+  A timestamped signer stamps `System.os_time/1` in its type's own unit —
+  seconds for the cosignature types, milliseconds for RFC 6962. Pass
+  `timestamp:` to fix it instead; the value is used verbatim, in each
+  signer's unit.
+
       iex> {:ok, signer} =
       ...>   SignedNote.Signer.from_ed25519_seed("example.com/k", String.duplicate(<<7>>, 32))
       iex> {:ok, note} = SignedNote.sign("hello\\n", [signer])
@@ -114,8 +141,21 @@ defmodule SignedNote do
       iex> opened.verified_names
       ["example.com/k"]
   """
-  @spec sign(String.t(), [Signer.t()]) :: {:ok, binary()} | {:error, Error.t()}
-  def sign(text, signers) when is_binary(text) and is_list(signers) do
+  @spec sign(String.t(), [Signer.t()], keyword()) :: {:ok, binary()} | {:error, Error.t()}
+  def sign(text, signers, opts \\ []) when is_binary(text) and is_list(signers) do
+    case signable(text, signers) do
+      :ok ->
+        case signature_lines(signers, text, opts) do
+          {:ok, lines} -> within_size_limit(IO.iodata_to_binary([text, "\n", lines]))
+          {:error, %Error{} = error} -> {:error, error}
+        end
+
+      {:error, %Error{} = error} ->
+        {:error, error}
+    end
+  end
+
+  defp signable(text, signers) do
     cond do
       text == "" or not String.ends_with?(text, "\n") ->
         {:error,
@@ -142,9 +182,7 @@ defmodule SignedNote do
          }}
 
       true ->
-        signature_lines = Enum.map(signers, &signature_line(&1, text))
-        note = IO.iodata_to_binary([text, "\n", signature_lines])
-        within_size_limit(note)
+        :ok
     end
   end
 
@@ -186,29 +224,25 @@ defmodule SignedNote do
       iex> Enum.sort(opened.verified_names)
       ["log.example", "witness.example"]
   """
-  @spec cosign(binary(), [Signer.t()]) :: {:ok, binary()} | {:error, Error.t()}
-  def cosign(binary, signers) when is_binary(binary) and is_list(signers) do
+  @spec cosign(binary(), [Signer.t()], keyword()) :: {:ok, binary()} | {:error, Error.t()}
+  def cosign(binary, signers, opts \\ []) when is_binary(binary) and is_list(signers) do
     with {:ok, note} <- parse_unverified(binary) do
-      add_signatures(binary, note, signers)
+      add_signatures(binary, note, signers, opts)
     end
   end
 
-  defp add_signatures(_binary, _note, []),
+  defp add_signatures(_binary, _note, [], _opts),
     do: {:error, %Error{reason: :no_signers, message: "at least one signer is required"}}
 
-  defp add_signatures(binary, %__MODULE__{} = note, signers) do
+  defp add_signatures(binary, %__MODULE__{} = note, signers, opts) do
     present = MapSet.new(note.signatures, &{&1.name, &1.key_id})
-
-    new_lines =
-      signers
-      |> Enum.reject(&MapSet.member?(present, {&1.name, &1.key_id}))
-      |> Enum.map(&signature_line(&1, note.text))
+    fresh = Enum.reject(signers, &MapSet.member?(present, {&1.name, &1.key_id}))
 
     cond do
-      new_lines == [] ->
+      fresh == [] ->
         {:ok, binary}
 
-      length(note.signatures) + length(new_lines) > @max_signatures ->
+      length(note.signatures) + length(fresh) > @max_signatures ->
         {:error,
          %Error{
            reason: :too_many_signatures,
@@ -216,7 +250,10 @@ defmodule SignedNote do
          }}
 
       true ->
-        within_size_limit(IO.iodata_to_binary([binary, new_lines]))
+        case signature_lines(fresh, note.text, opts) do
+          {:ok, lines} -> within_size_limit(IO.iodata_to_binary([binary, lines]))
+          {:error, %Error{} = error} -> {:error, error}
+        end
     end
   end
 
@@ -264,28 +301,48 @@ defmodule SignedNote do
     {:error, %Error{reason: :malformed, message: "note has no text terminated by a blank line"}}
   end
 
-  defp signature_line(%Signer{} = signer, text) do
-    blob = signer.key_id <> Signer.sign(signer, text)
-    "— " <> signer.name <> " " <> Base.encode64(blob) <> "\n"
+  # Explicit recursion, not Enum.map/2 over a fallible body: one signer
+  # whose type cannot sign this text — an RFC 6962 key over a note that is
+  # not a checkpoint — has to stop the whole note, not produce a line that
+  # would never verify.
+  defp signature_lines(signers, text, opts), do: signature_lines(signers, text, opts, [])
+
+  defp signature_lines([], _text, _opts, acc), do: {:ok, Enum.reverse(acc)}
+
+  defp signature_lines([%Signer{} = signer | rest], text, opts, acc) do
+    case Signer.sign(signer, text, timestamp(signer, opts)) do
+      {:ok, body} ->
+        line = "— " <> signer.name <> " " <> Base.encode64(signer.key_id <> body) <> "\n"
+        signature_lines(rest, text, opts, [line | acc])
+
+      {:error, %Error{} = error} ->
+        {:error, error}
+    end
   end
 
+  # Each type stamps in its own unit, so a caller-supplied timestamp is
+  # taken as already being in it rather than converted.
+  defp timestamp(%Signer{type: type}, opts) do
+    case Keyword.fetch(opts, :timestamp) do
+      {:ok, timestamp} -> timestamp
+      :error -> now(SignatureType.timestamp_unit(type))
+    end
+  end
+
+  defp now(nil), do: 0
+  defp now(unit), do: System.os_time(unit)
+
   defp verify(%__MODULE__{} = note, verifiers) do
-    case check_signatures(
-           note.signatures,
-           index_verifiers(verifiers),
-           note.text,
-           [],
-           %{}
-         ) do
-      {:ok, []} ->
+    case check_signatures(note.signatures, index_verifiers(verifiers), note.text, [], [], %{}) do
+      {:ok, {_signatures, []}} ->
         {:error,
          %Error{
            reason: :no_verifiable_signature,
            message: "no signature from a known key verified"
          }}
 
-      {:ok, names} ->
-        {:ok, %__MODULE__{note | verified_names: Enum.reverse(names)}}
+      {:ok, {signatures, names}} ->
+        {:ok, %__MODULE__{note | signatures: signatures, verified_names: Enum.reverse(names)}}
 
       {:error, %Error{} = error} ->
         {:error, error}
@@ -296,14 +353,15 @@ defmodule SignedNote do
   # dynamic(), erasing this function's inferred return type and every
   # caller's compile-time check of it. Each clause below returns one of two
   # known shapes instead.
-  defp check_signatures([], _known, _text, names, _seen), do: {:ok, names}
+  defp check_signatures([], _known, _text, kept, names, _seen),
+    do: {:ok, {Enum.reverse(kept), names}}
 
-  defp check_signatures([%Signature{} = signature | rest], known, text, names, seen) do
+  defp check_signatures([%Signature{} = signature | rest], known, text, kept, names, seen) do
     key = {signature.name, signature.key_id}
 
     case Map.get(known, key) do
       nil ->
-        check_signatures(rest, known, text, names, seen)
+        check_signatures(rest, known, text, [signature | kept], names, seen)
 
       :ambiguous ->
         {:error,
@@ -313,22 +371,43 @@ defmodule SignedNote do
          }}
 
       %Verifier{} = verifier ->
-        cond do
-          # Reference semantics: repeated signatures by one verifier are
-          # skipped without verification after the first.
-          Map.has_key?(seen, key) ->
-            check_signatures(rest, known, text, names, seen)
-
-          ed25519_valid?(verifier, text, signature.signature) ->
-            check_signatures(rest, known, text, [verifier.name | names], Map.put(seen, key, true))
-
-          true ->
-            {:error,
-             %Error{
-               reason: :signature_invalid,
-               message: "signature by #{inspect(verifier.name)} failed to verify"
-             }}
+        # Reference semantics: repeated signatures by one verifier are
+        # skipped without verification after the first.
+        if Map.has_key?(seen, key) do
+          check_signatures(rest, known, text, [signature | kept], names, seen)
+        else
+          check_known(signature, rest, known, text, kept, names, seen, verifier)
         end
+    end
+  end
+
+  defp check_known(%Signature{} = signature, rest, known, text, kept, names, seen, verifier) do
+    case Algorithm.verify(
+           verifier.type,
+           verifier.name,
+           verifier.public_key,
+           text,
+           signature.signature
+         ) do
+      {:ok, timestamp} ->
+        verified = %Signature{signature | timestamp: timestamp}
+        key = {signature.name, signature.key_id}
+
+        check_signatures(
+          rest,
+          known,
+          text,
+          [verified | kept],
+          [verifier.name | names],
+          Map.put(seen, key, true)
+        )
+
+      :error ->
+        {:error,
+         %Error{
+           reason: :signature_invalid,
+           message: "signature by #{inspect(verifier.name)} failed to verify"
+         }}
     end
   end
 
@@ -341,11 +420,6 @@ defmodule SignedNote do
         :ambiguous
       end)
     end)
-  end
-
-  defp ed25519_valid?(%Verifier{public_key: public_key}, text, signature) do
-    byte_size(signature) == 64 and
-      :crypto.verify(:eddsa, :none, text, signature, [public_key, :ed25519])
   end
 
   # Signed notes MUST be valid UTF-8 and MUST NOT contain ASCII control

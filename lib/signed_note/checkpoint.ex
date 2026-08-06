@@ -36,8 +36,20 @@ defmodule SignedNote.Checkpoint do
   # renderer refuses anything the parser would then reject. Defined here,
   # before first use — an attribute referenced above its definition expands
   # to nil, and `size <= nil` is true under Erlang term ordering.
-  @max_tree_size_digits 19
-  @max_tree_size 9_999_999_999_999_999_999
+  #
+  # The specification sets no upper bound, so the bound is this library's
+  # own, chosen as the largest size any of it can actually mean: both the
+  # RFC 6962 TreeHeadSignature and the ML-DSA cosigned_message carry the
+  # tree size as a uint64, so a larger checkpoint could be written down
+  # but never signed under those types. It matches the reference
+  # implementations, which parse the line as a 64-bit unsigned integer.
+  #
+  # A bound is needed at all because the digit count is what stops a
+  # hostile line from becoming a bignum before it can be rejected: a
+  # megabyte of digits costs ~110ms to parse and ~415KB to hold, where the
+  # bound rejects it in microseconds.
+  @max_tree_size_digits 20
+  @max_tree_size 18_446_744_073_709_551_615
 
   @enforce_keys [:origin, :tree_size, :root_hash]
   defstruct origin: nil, tree_size: nil, root_hash: nil, extension_lines: []
@@ -176,37 +188,34 @@ defmodule SignedNote.Checkpoint do
     do:
       {:error, %Error{reason: :invalid_checkpoint, message: "root hash is empty or not a binary"}}
 
-  # ASCII decimal, no leading zeros; a lone "0" is the empty tree. The digit
-  # bound keeps a hostile line from turning into a bignum before it is
-  # rejected: a megabyte of digits costs ~110ms to parse and ~415KB to hold,
-  # where the bound rejects it in microseconds. Nineteen digits covers every
-  # tree size up to 2^63 - 1, past any log the reference implementation can
-  # represent.
-
+  # ASCII decimal, no leading zeros; a lone "0" is the empty tree. The
+  # digit count bounds the work before parsing, and the value bound then
+  # rejects the twenty-digit numbers that overflow a uint64.
   defp parse_tree_size("0"), do: {:ok, 0}
 
   defp parse_tree_size(<<digit, _rest::binary>> = line)
        when digit in ?1..?9 and byte_size(line) <= @max_tree_size_digits do
     case Integer.parse(line) do
-      {tree_size, ""} ->
-        {:ok, tree_size}
-
-      _not_decimal ->
-        {:error,
-         %Error{
-           reason: :invalid_checkpoint,
-           message: "tree size is not a decimal integer without leading zeros"
-         }}
+      {tree_size, ""} -> validated_tree_size(tree_size)
+      _not_decimal -> {:error, not_a_tree_size()}
     end
   end
 
-  defp parse_tree_size(_line),
-    do:
-      {:error,
-       %Error{
-         reason: :invalid_checkpoint,
-         message: "tree size is not a decimal integer without leading zeros"
-       }}
+  defp parse_tree_size(_line), do: {:error, not_a_tree_size()}
+
+  defp validated_tree_size(tree_size) do
+    case validate_tree_size(tree_size) do
+      :ok -> {:ok, tree_size}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  defp not_a_tree_size do
+    %Error{
+      reason: :invalid_checkpoint,
+      message: "tree size is not a decimal integer without leading zeros"
+    }
+  end
 
   defp parse_root_hash(b64) do
     case Base.decode64(b64) do

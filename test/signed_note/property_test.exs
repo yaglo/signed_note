@@ -2,6 +2,31 @@ defmodule SignedNote.PropertyTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
+  @origin "prop.example/log"
+
+  # One key per signature type, generated once. Key generation dominates
+  # the cost for ECDSA and ML-DSA, and the per-type properties below vary
+  # texts rather than keys. The key name is the origin, which
+  # `:rfc6962_sth` requires it to be.
+  setup_all do
+    signers =
+      Map.new(
+        [
+          :ed25519,
+          :ecdsa,
+          :ed25519_cosignature_v1,
+          :rfc6962_sth,
+          :mldsa44_cosignature_v1
+        ],
+        fn type ->
+          {:ok, signer} = SignedNote.Signer.generate(@origin, type)
+          {type, signer}
+        end
+      )
+
+    %{signers: signers}
+  end
+
   # Note text: non-empty, valid UTF-8, no control characters other than
   # newline, ending in a newline. Empty lines appear in the generated
   # corpus because the text/signature split at the LAST blank line is the
@@ -224,6 +249,106 @@ defmodule SignedNote.PropertyTest do
       {:ok, note} = SignedNote.open(note_binary, [SignedNote.Signer.verifier(signer)])
 
       assert {:ok, ^checkpoint} = SignedNote.Checkpoint.from_text(note.text)
+    end
+  end
+
+  describe "every signature type" do
+    defp checkpoint_text(tree_size, root_hash) do
+      "#{@origin}\n#{tree_size}\n#{Base.encode64(root_hash)}\n"
+    end
+
+    property "round-trips a checkpoint at any timestamp", %{signers: signers} do
+      check all(
+              tree_size <- integer(0..1_000_000_000),
+              root_hash <- binary(length: 32),
+              timestamp <- integer(0..2_000_000_000),
+              max_runs: 25
+            ) do
+        text = checkpoint_text(tree_size, root_hash)
+
+        for {_type, signer} <- signers do
+          assert {:ok, note} = SignedNote.sign(text, [signer], timestamp: timestamp)
+          verifier = SignedNote.Signer.verifier(signer)
+
+          assert {:ok, opened} = SignedNote.open(note, [verifier])
+          assert opened.text == text
+          assert opened.verified_names == [@origin]
+        end
+      end
+    end
+
+    property "rejects any single-byte mutation of the signed text", %{signers: signers} do
+      check all(
+              tree_size <- integer(1..1_000_000_000),
+              root_hash <- binary(length: 32),
+              position <- integer(0..10_000),
+              xor <- integer(1..255),
+              max_runs: 25
+            ) do
+        text = checkpoint_text(tree_size, root_hash)
+        position = rem(position, byte_size(text))
+
+        for {_type, signer} <- signers do
+          {:ok, note} = SignedNote.sign(text, [signer], timestamp: 1_679_315_147)
+          verifier = SignedNote.Signer.verifier(signer)
+
+          <<prefix::binary-size(^position), byte, suffix::binary>> = note
+          mutated = <<prefix::binary, Bitwise.bxor(byte, xor), suffix::binary>>
+
+          refute match?({:ok, %{text: ^text}}, SignedNote.open(mutated, [verifier])),
+                 "a mutated text still opened as the original"
+        end
+      end
+    end
+
+    property "rejects a signature body of any other length", %{signers: signers} do
+      # The framing of a signature body is part of each type's format: a
+      # body that is not exactly what the type defines must be rejected
+      # rather than parsed leniently.
+      check all(
+              root_hash <- binary(length: 32),
+              trim <- integer(1..8),
+              max_runs: 20
+            ) do
+        text = checkpoint_text(7, root_hash)
+
+        for {_type, signer} <- signers do
+          {:ok, note} = SignedNote.sign(text, [signer], timestamp: 1_679_315_147)
+          {:ok, parsed} = SignedNote.parse_unverified(note)
+          [signature] = parsed.signatures
+          verifier = SignedNote.Signer.verifier(signer)
+
+          for body <- [
+                binary_part(signature.signature, 0, byte_size(signature.signature) - trim),
+                signature.signature <> :binary.copy(<<0>>, trim)
+              ] do
+            blob = Base.encode64(signature.key_id <> body)
+            rebuilt = parsed.text <> "\n— " <> signature.name <> " " <> blob <> "\n"
+
+            assert {:error, %SignedNote.Error{}} = SignedNote.open(rebuilt, [verifier])
+          end
+        end
+      end
+    end
+
+    property "vkey and skey encodings round-trip for every type", %{signers: signers} do
+      check all(name <- string(:alphanumeric, min_length: 1, max_length: 20), max_runs: 20) do
+        for {type, template} <- signers do
+          {:ok, signer} =
+            SignedNote.Signer.new("codec.example/" <> name, type, template.private_key,
+              public_key: template.public_key
+            )
+
+          skey = SignedNote.Signer.to_string(signer)
+
+          assert {:ok, ^signer} =
+                   SignedNote.Signer.from_string(skey, public_key: signer.public_key)
+
+          verifier = SignedNote.Signer.verifier(signer)
+          vkey = SignedNote.Verifier.to_string(verifier)
+          assert {:ok, ^verifier} = SignedNote.Verifier.from_string(vkey)
+        end
+      end
     end
   end
 end

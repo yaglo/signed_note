@@ -157,9 +157,11 @@ defmodule SignedNote.CheckpointTest do
 
   test "render and parse agree on the tree-size bound" do
     # A tree size the renderer accepts must reparse; otherwise to_text! and
-    # from_text disagree about what a valid checkpoint is.
+    # from_text disagree about what a valid checkpoint is. The bound is the
+    # largest uint64, the largest size the RFC 6962 and ML-DSA cosignature
+    # structures can carry.
     root = <<0::256>>
-    at_bound = 9_999_999_999_999_999_999
+    at_bound = 18_446_744_073_709_551_615
 
     assert {:ok, text} =
              Checkpoint.to_text(%Checkpoint{origin: "o", tree_size: at_bound, root_hash: root})
@@ -172,5 +174,23 @@ defmodule SignedNote.CheckpointTest do
                tree_size: at_bound + 1,
                root_hash: root
              })
+
+    # And the parser refuses it from the other direction, whether it
+    # overflows on value or on digit count.
+    for oversized <- ["18446744073709551616", "99999999999999999999", String.duplicate("9", 21)] do
+      assert {:error, %SignedNote.Error{reason: :invalid_checkpoint}} =
+               Checkpoint.from_text("o\n#{oversized}\n#{Base.encode64(root)}\n")
+    end
+  end
+
+  test "a tree size the specification allows and a uint64 can hold is accepted" do
+    # Previously bounded at nineteen digits, which rejected the top of the
+    # uint64 range that both signature structures can carry.
+    root = Base.encode64(<<0::256>>)
+
+    for size <- ["10000000000000000000", "18446744073709551615"] do
+      assert {:ok, checkpoint} = Checkpoint.from_text("o.example/l\n#{size}\n#{root}\n")
+      assert Integer.to_string(checkpoint.tree_size) == size
+    end
   end
 end

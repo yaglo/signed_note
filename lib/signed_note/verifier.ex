@@ -5,25 +5,36 @@ defmodule SignedNote.Verifier do
 
       <key name>+<hex key ID>+<base64(signature type || public key)>
 
-  For Ed25519 keys (signature type `0x01`, the only type this library
-  implements), the key ID embedded in the vkey must equal the first four
-  bytes of `SHA-256(key name || 0x0A || 0x01 || public key)`, so a
-  mistyped or tampered vkey fails at parse time rather than producing a
-  verifier that can never match a signature.
+  The signature type byte selects the algorithm, and with it the meaning
+  of the public key material that follows and the derivation of the key
+  ID — see `SignedNote.SignatureType` for all five.
+
+  The key ID embedded in a vkey must equal the one the name and key
+  derive, so a mistyped or tampered vkey fails at parse time rather than
+  producing a verifier that can never match a signature.
+
+      iex> {:ok, verifier} =
+      ...>   SignedNote.Verifier.from_string(
+      ...>     "example.com/foo+530d903a+AekyeRrm56hApGFkyQR4ZCbV54Id2LKaANYcrnKv3U2k"
+      ...>   )
+      iex> verifier.type
+      :ed25519
   """
 
-  alias SignedNote.{Error, KeyName}
-
-  @ed25519_type 0x01
+  alias SignedNote.{Algorithm, Error, KeyName, SignatureType}
 
   @enforce_keys [:name, :key_id, :public_key]
-  defstruct [:name, :key_id, :public_key]
+  defstruct [:name, :key_id, :public_key, type: :ed25519]
 
-  @typedoc "An Ed25519 verifier: key name, 4-byte key ID, 32-byte public key."
+  @typedoc """
+  A verifier: key name, 4-byte key ID, signature type, and the public key
+  material that type defines.
+  """
   @type t :: %__MODULE__{
           name: String.t(),
           key_id: <<_::4*8>>,
-          public_key: <<_::32*8>>
+          type: SignatureType.t(),
+          public_key: binary()
         }
 
   @doc """
@@ -73,15 +84,8 @@ defmodule SignedNote.Verifier do
 
   defp from_keyed_parts(name, key_id, material_b64) do
     case decode_material(material_b64) do
-      {:ok, <<@ed25519_type, public_key::binary-size(32)>>} ->
-        checked_verifier(name, key_id, public_key)
-
-      {:ok, <<type, _rest::binary>>} ->
-        {:error,
-         %Error{
-           reason: :unsupported_algorithm,
-           message: "unsupported signature type 0x#{hex2(type)}"
-         }}
+      {:ok, <<type_byte, public_key::binary>>} when public_key != <<>> ->
+        from_typed_parts(name, key_id, type_byte, public_key)
 
       {:ok, _too_short} ->
         {:error, %Error{reason: :invalid_key_encoding, message: "malformed verifier key"}}
@@ -91,26 +95,68 @@ defmodule SignedNote.Verifier do
     end
   end
 
-  defp checked_verifier(name, key_id, public_key) do
-    case check_key_id(name, public_key, key_id) do
-      :ok -> {:ok, %__MODULE__{name: name, key_id: key_id, public_key: public_key}}
-      {:error, %Error{} = error} -> {:error, error}
+  defp from_typed_parts(name, key_id, type_byte, public_key) do
+    case SignatureType.from_byte(type_byte) do
+      {:ok, type} ->
+        checked_verifier(name, key_id, type, public_key)
+
+      :error ->
+        {:error,
+         %Error{
+           reason: :unsupported_algorithm,
+           message: "unsupported signature type 0x#{hex2(type_byte)}"
+         }}
     end
   end
 
-  @doc """
-  Builds a verifier from a key name and a raw 32-byte Ed25519 public key,
-  computing the key ID.
-  """
-  @spec from_ed25519(String.t(), <<_::32*8>>) :: {:ok, t()} | {:error, Error.t()}
-  def from_ed25519(name, public_key) when is_binary(name) and byte_size(public_key) == 32 do
-    case KeyName.validate(name) do
-      :ok ->
-        {:ok, %__MODULE__{name: name, key_id: key_id(name, public_key), public_key: public_key}}
+  defp checked_verifier(name, key_id, type, public_key) do
+    case new(name, type, public_key) do
+      {:ok, verifier} when verifier.key_id == key_id ->
+        {:ok, verifier}
+
+      {:ok, _mismatched} ->
+        {:error,
+         %Error{
+           reason: :key_id_mismatch,
+           message: "key ID does not match the one this name and key derive"
+         }}
 
       {:error, %Error{} = error} ->
         {:error, error}
     end
+  end
+
+  @doc """
+  Builds a verifier from a key name, a signature type, and that type's
+  public key material, computing the key ID.
+
+      iex> {:ok, verifier} =
+      ...>   SignedNote.Verifier.new("witness.example/w1", :ed25519_cosignature_v1, <<0::256>>)
+      iex> verifier.type
+      :ed25519_cosignature_v1
+  """
+  @spec new(String.t(), SignatureType.t(), binary()) :: {:ok, t()} | {:error, Error.t()}
+  def new(name, type, public_key) when is_binary(name) and is_binary(public_key) do
+    with :ok <- KeyName.validate(name),
+         :ok <- Algorithm.validate_public_key(type, public_key) do
+      {:ok,
+       %__MODULE__{
+         name: name,
+         key_id: Algorithm.key_id(type, name, public_key),
+         type: type,
+         public_key: public_key
+       }}
+    end
+  end
+
+  @doc """
+  Builds an Ed25519 verifier from a key name and a raw 32-byte public key.
+
+  Equivalent to `new(name, :ed25519, public_key)`.
+  """
+  @spec from_ed25519(String.t(), <<_::32*8>>) :: {:ok, t()} | {:error, Error.t()}
+  def from_ed25519(name, public_key) when is_binary(name) and byte_size(public_key) == 32 do
+    new(name, :ed25519, public_key)
   end
 
   @doc """
@@ -124,22 +170,18 @@ defmodule SignedNote.Verifier do
       "example.com/foo+530d903a+AekyeRrm56hApGFkyQR4ZCbV54Id2LKaANYcrnKv3U2k"
   """
   @spec to_string(t()) :: String.t()
-  def to_string(%__MODULE__{name: name, key_id: key_id, public_key: public_key}) do
-    name <>
+  def to_string(%__MODULE__{} = verifier) do
+    verifier.name <>
       "+" <>
-      Base.encode16(key_id, case: :lower) <>
-      "+" <> Base.encode64(<<@ed25519_type, public_key::binary>>)
+      Base.encode16(verifier.key_id, case: :lower) <>
+      "+" <> Base.encode64(<<SignatureType.byte(verifier.type), verifier.public_key::binary>>)
   end
 
   @doc false
   # C2SP signed-note, "Ed25519 signatures":
   # key ID = SHA-256(key name || 0x0A || 0x01 || public key)[:4]
   @spec key_id(String.t(), <<_::32*8>>) :: <<_::4*8>>
-  def key_id(name, public_key) do
-    :sha256
-    |> :crypto.hash([name, "\n", @ed25519_type, public_key])
-    |> binary_part(0, 4)
-  end
+  def key_id(name, public_key), do: Algorithm.key_id(:ed25519, name, public_key)
 
   defp decode_key_id(id_hex) do
     case Base.decode16(id_hex, case: :lower) do
@@ -162,18 +204,6 @@ defmodule SignedNote.Verifier do
 
       :error ->
         {:error, %Error{reason: :invalid_key_encoding, message: "malformed key material base64"}}
-    end
-  end
-
-  defp check_key_id(name, public_key, key_id) do
-    if key_id(name, public_key) == key_id do
-      :ok
-    else
-      {:error,
-       %Error{
-         reason: :key_id_mismatch,
-         message: "key ID does not match SHA-256(name, type, public key)"
-       }}
     end
   end
 

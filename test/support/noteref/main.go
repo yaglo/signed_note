@@ -117,7 +117,11 @@ func main() {
 			os.Exit(3)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "unknown mode")
-		os.Exit(2)
+		// The signature types beyond Ed25519 live in typed.go, which
+		// drives a different reference package.
+		if !typedMain(os.Args[1]) {
+			fmt.Fprintln(os.Stderr, "unknown mode")
+			os.Exit(2)
+		}
 	}
 }
