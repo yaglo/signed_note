@@ -13,6 +13,10 @@ jobs:
   test:
     name: ${{ matrix.os }} / OTP ${{ matrix.otp }} / Elixir ${{ matrix.elixir }}
     runs-on: ${{ matrix.os }}
+    # The whole job takes about two minutes, including the 100k-case
+    # differential fuzz on tags. A preview runner image has hung here
+    # before, and without a bound that costs six hours of the default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
