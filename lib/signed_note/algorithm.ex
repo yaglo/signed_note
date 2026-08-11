@@ -95,8 +95,9 @@ defmodule SignedNote.Algorithm do
       do: :ok
 
   def validate_public_key(:mldsa44_cosignature_v1, key)
-      when byte_size(key) == @mldsa44_public_key_bytes,
-      do: :ok
+      when byte_size(key) == @mldsa44_public_key_bytes do
+    supported(:mldsa44_cosignature_v1)
+  end
 
   def validate_public_key(:ecdsa, der) do
     case DER.ec_public_key(der) do
@@ -137,6 +138,26 @@ defmodule SignedNote.Algorithm do
   end
 
   defp bad_key(message), do: %Error{reason: :invalid_key_encoding, message: message}
+
+  # A key of a type this build cannot compute with is refused where it is
+  # built, so no later call has to guard against a primitive that is not
+  # there. ML-DSA-44 needs OpenSSL 3.5 or later under OTP's crypto.
+  defp supported(type) do
+    if SignatureType.supported?(type), do: :ok, else: {:error, unsupported_algorithm(type)}
+  end
+
+  @doc false
+  # Public so it can be exercised on a build where the primitive IS
+  # present, which is the only place the rest of the suite runs.
+  @spec unsupported_algorithm(SignatureType.t()) :: Error.t()
+  def unsupported_algorithm(type) do
+    %Error{
+      reason: :unsupported_algorithm,
+      message:
+        "#{SignatureType.label(type)} needs OpenSSL 3.5 or later under OTP's crypto, " <>
+          "which this build does not have"
+    }
+  end
 
   # An RFC 6962 log key is one of exactly two things, and which one it is
   # selects the signature algorithm byte in the digitally-signed struct.
@@ -325,7 +346,8 @@ defmodule SignedNote.Algorithm do
   @spec sign_subtree(String.t(), term(), subtree(), integer()) ::
           {:ok, binary()} | {:error, Error.t()}
   def sign_subtree(cosigner_name, private_key, subtree, timestamp) do
-    with :ok <- validate_timestamp(timestamp),
+    with :ok <- supported(:mldsa44_cosignature_v1),
+         :ok <- validate_timestamp(timestamp),
          {:ok, message} <- cosigned_message(cosigner_name, timestamp, subtree) do
       signature = :crypto.sign(:mldsa44, :none, message, private_key)
       {:ok, <<timestamp::unsigned-big-64, signature::binary>>}
@@ -448,8 +470,9 @@ defmodule SignedNote.Algorithm do
   """
   @spec validate_private_key(SignatureType.t(), term()) :: :ok | {:error, Error.t()}
   def validate_private_key(:mldsa44_cosignature_v1, {tag, key})
-      when tag in [:seed, :expandedkey] and is_binary(key) and byte_size(key) > 0,
-      do: :ok
+      when tag in [:seed, :expandedkey] and is_binary(key) and byte_size(key) > 0 do
+    supported(:mldsa44_cosignature_v1)
+  end
 
   def validate_private_key(:mldsa44_cosignature_v1, _other) do
     {:error, bad_key("ML-DSA-44 private key must be {:seed, bytes} or {:expandedkey, bytes}")}
@@ -595,7 +618,8 @@ defmodule SignedNote.Algorithm do
   end
 
   defp mldsa44_verify(public_key, message, signature) do
-    :crypto.verify(:mldsa44, :none, message, signature, public_key)
+    SignatureType.supported?(:mldsa44_cosignature_v1) and
+      :crypto.verify(:mldsa44, :none, message, signature, public_key)
   end
 
   # OTP's crypto raises rather than returning false when it cannot load a

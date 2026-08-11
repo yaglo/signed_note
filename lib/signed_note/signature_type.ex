@@ -120,6 +120,28 @@ defmodule SignedNote.SignatureType do
   def timestamp_unit(:rfc6962_sth), do: :millisecond
   def timestamp_unit(:mldsa44_cosignature_v1), do: :second
 
+  @doc """
+  Whether this OTP build can sign and verify under `type`.
+
+  Four of the five types rest on primitives OTP's crypto has always had.
+  ML-DSA-44 needs OpenSSL 3.5 or later underneath it, which many current
+  systems do not have — Ubuntu 24.04 ships OpenSSL 3.0 — so a note
+  library that assumed it would crash rather than fail on exactly the
+  deployments most likely to be running.
+
+  Keys of an unsupported type are refused when they are built, so nothing
+  downstream has to ask again; this is exposed so a caller can find out
+  before it tries.
+
+      iex> SignedNote.SignatureType.supported?(:ed25519)
+      true
+  """
+  @spec supported?(t()) :: boolean()
+  def supported?(:mldsa44_cosignature_v1), do: :mldsa44 in :crypto.supports(:public_keys)
+
+  def supported?(type) when type in [:ed25519, :ecdsa, :ed25519_cosignature_v1, :rfc6962_sth],
+    do: true
+
   @doc false
   # Prose for error messages, where the atom alone reads poorly.
   @spec label(t()) :: String.t()

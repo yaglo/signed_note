@@ -11,13 +11,16 @@ defmodule SignedNote.PropertyTest do
   setup_all do
     signers =
       Map.new(
-        [
-          :ed25519,
-          :ecdsa,
-          :ed25519_cosignature_v1,
-          :rfc6962_sth,
-          :mldsa44_cosignature_v1
-        ],
+        Enum.filter(
+          [
+            :ed25519,
+            :ecdsa,
+            :ed25519_cosignature_v1,
+            :rfc6962_sth,
+            :mldsa44_cosignature_v1
+          ],
+          &SignedNote.SignatureType.supported?/1
+        ),
         fn type ->
           {:ok, signer} = SignedNote.Signer.generate(@origin, type)
           {type, signer}

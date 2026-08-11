@@ -1,6 +1,8 @@
 defmodule SignedNote.SubtreeTest do
   use ExUnit.Case, async: true
 
+  @moduletag :mldsa44
+
   alias SignedNote.{Checkpoint, Error, Signer, Subtree}
 
   @origin "example.com/behind-the-sofa"

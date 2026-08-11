@@ -46,6 +46,14 @@ The library has no package dependencies and requires Erlang/OTP 29 and
 Elixir 1.20.2 or later. Signing and verification use OTP's `:crypto`, and
 the X.509-keyed types read their keys with OTP's `:public_key`.
 
+Four of the five signature types work on any OTP build. ML-DSA-44
+(`0x06`) additionally needs OpenSSL 3.5 or later underneath `:crypto` —
+Ubuntu 24.04 ships OpenSSL 3.0, so this is common. Where it is missing,
+keys of that type are refused with `:unsupported_algorithm` when they are
+built and verification of such a signature fails rather than raising;
+everything else is unaffected. `SignedNote.SignatureType.supported?/1`
+reports it.
+
 ## Installation
 
 ```elixir

@@ -135,6 +135,7 @@ defmodule SignedNote.GoVectorsTest do
     end
 
     for {type, vkey, note} <- @typed_cases do
+      @tag mldsa44: type == "mldsa"
       test "#{type}: the reference vkey parses and its note verifies" do
         vkey = unquote(vkey)
         note = unquote(note)
@@ -151,6 +152,7 @@ defmodule SignedNote.GoVectorsTest do
                  "#{verifier.name}\n42\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
       end
 
+      @tag mldsa44: type == "mldsa"
       test "#{type}: a one-byte change to the reference note is rejected" do
         vkey = unquote(vkey)
         note = unquote(note)
@@ -161,6 +163,7 @@ defmodule SignedNote.GoVectorsTest do
       end
     end
 
+    @tag :mldsa44
     test "the timestamped types carry the timestamp the reference stamped" do
       for {type, vkey, note} <- @typed_cases, type in ~w(cosigv1 rfc6962 rfc6962rsa mldsa) do
         {:ok, verifier} = SignedNote.Verifier.from_string(vkey)

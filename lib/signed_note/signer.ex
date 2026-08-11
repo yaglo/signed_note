@@ -182,13 +182,15 @@ defmodule SignedNote.Signer do
   end
 
   def generate(name, :mldsa44_cosignature_v1, opts) do
-    case key_option(:mldsa44_cosignature_v1, opts) do
-      {:ok, :default} ->
-        {public_key, expanded} = :crypto.generate_key(:mldsa44, [])
-        new(name, :mldsa44_cosignature_v1, {:expandedkey, expanded}, public_key: public_key)
-
-      {:error, %Error{} = error} ->
-        {:error, error}
+    with {:ok, :default} <- key_option(:mldsa44_cosignature_v1, opts),
+         # Checked before the key is generated, not after: OTP's crypto
+         # raises rather than returning an error when the primitive is
+         # missing from the OpenSSL it was built against.
+         :ok <- Algorithm.validate_private_key(:mldsa44_cosignature_v1, {:seed, <<0>>}) do
+      {public_key, expanded} = :crypto.generate_key(:mldsa44, [])
+      new(name, :mldsa44_cosignature_v1, {:expandedkey, expanded}, public_key: public_key)
+    else
+      {:error, %Error{} = error} -> {:error, error}
     end
   end
 

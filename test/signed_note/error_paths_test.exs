@@ -119,6 +119,7 @@ defmodule SignedNote.ErrorPathsTest do
                Signer.new(@origin, :ed25519, signer.private_key, public_key: other.public_key)
     end
 
+    @tag :mldsa44
     test "an ML-DSA-44 private key that is neither seed nor expanded key" do
       for bad <- [<<1, 2, 3>>, {:seed, <<>>}, {:other, <<0::256>>}, :nonsense] do
         assert {:error, %Error{reason: :invalid_key_encoding} = error} =
@@ -178,6 +179,7 @@ defmodule SignedNote.ErrorPathsTest do
       assert {:error, %Error{reason: :signature_invalid}} = SignedNote.open(note, [verifier])
     end
 
+    @tag :mldsa44
     test "an ML-DSA cosignature body of the wrong length does not verify" do
       verifier = signer!(:mldsa44_cosignature_v1) |> Signer.verifier()
       note = note_with_signature(verifier, @checkpoint, <<1::unsigned-big-64, 0::8>>)
@@ -185,6 +187,7 @@ defmodule SignedNote.ErrorPathsTest do
       assert {:error, %Error{reason: :signature_invalid}} = SignedNote.open(note, [verifier])
     end
 
+    @tag :mldsa44
     test "an ML-DSA cosignature over text that is not a checkpoint does not verify" do
       verifier = signer!(:mldsa44_cosignature_v1) |> Signer.verifier()
       body = <<1::unsigned-big-64, 0::2420*8>>
@@ -210,6 +213,7 @@ defmodule SignedNote.ErrorPathsTest do
       end
     end
 
+    @tag :mldsa44
     test "an ML-DSA cosigner name over 255 bytes cannot sign" do
       long = "w.example/" <> String.duplicate("n", 250)
       signer = signer!(:mldsa44_cosignature_v1, long)
@@ -220,6 +224,7 @@ defmodule SignedNote.ErrorPathsTest do
       assert error.message =~ "255 bytes"
     end
 
+    @tag :mldsa44
     test "an ML-DSA cosignature over a checkpoint origin longer than 255 bytes" do
       origin = "log.example/" <> String.duplicate("o", 250)
       text = "#{origin}\n42\nCsUYapGGPo4dkMgIAUqom/Xajj7h2fB2MPA3j2jxq2I=\n"
@@ -234,7 +239,11 @@ defmodule SignedNote.ErrorPathsTest do
     test "a root hash that is not 32 bytes is refused by both checkpoint types" do
       text = "#{@origin}\n42\n#{Base.encode64(<<0::128>>)}\n"
 
-      for type <- [:rfc6962_sth, :mldsa44_cosignature_v1] do
+      for type <-
+            Enum.filter(
+              [:rfc6962_sth, :mldsa44_cosignature_v1],
+              &SignedNote.SignatureType.supported?/1
+            ) do
         assert {:error, %Error{reason: :invalid_checkpoint} = error} =
                  SignedNote.sign(text, [signer!(type)], timestamp: 1)
 

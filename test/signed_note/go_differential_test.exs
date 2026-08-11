@@ -389,12 +389,20 @@ defmodule SignedNote.GoDifferentialTest do
   # key name serves every type.
   defp typed_text(name, i), do: "#{name}\n#{i}\n#{Base.encode64(<<i::256>>)}\n"
 
-  @typed_types [
-    {"ecdsa", :ecdsa},
-    {"cosigv1", :ed25519_cosignature_v1},
-    {"rfc6962", :rfc6962_sth},
-    {"mldsa", :mldsa44_cosignature_v1}
-  ]
+  # A tag will not do here: `--include go_differential` re-includes every
+  # test in this module, capability exclusions and all, so the ML-DSA
+  # cases are left undefined rather than skipped.
+  @mldsa44 SignedNote.SignatureType.supported?(:mldsa44_cosignature_v1)
+
+  @typed_types Enum.filter(
+                 [
+                   {"ecdsa", :ecdsa},
+                   {"cosigv1", :ed25519_cosignature_v1},
+                   {"rfc6962", :rfc6962_sth},
+                   {"mldsa", :mldsa44_cosignature_v1}
+                 ],
+                 fn {_go, ex} -> SignedNote.SignatureType.supported?(ex) end
+               )
 
   for {go_type, ex_type} <- @typed_types do
     test "#{go_type}: Go's vkey parses in Elixir with the same key ID" do
@@ -597,137 +605,139 @@ defmodule SignedNote.GoDifferentialTest do
     {signer, verifier, skey, vkey}
   end
 
-  @subtrees [
-    {"a partial subtree", 1024, 2048, 0},
-    {"a whole tree", 0, 20_852_163, 1_679_315_147},
-    {"an empty range", 7, 7, 0},
-    {"the largest bounds a uint64 holds", 1, 18_446_744_073_709_551_615, 0}
-  ]
+  if @mldsa44 do
+    @subtrees [
+      {"a partial subtree", 1024, 2048, 0},
+      {"a whole tree", 0, 20_852_163, 1_679_315_147},
+      {"an empty range", 7, 7, 0},
+      {"the largest bounds a uint64 holds", 1, 18_446_744_073_709_551_615, 0}
+    ]
 
-  for {label, start, stop, timestamp} <- @subtrees do
-    test "subtree cosignature over #{label}: Go signs, Elixir verifies" do
-      {_signer, verifier, skey, _vkey} = mldsa_pair("gosub.example/pq")
+    for {label, start, stop, timestamp} <- @subtrees do
+      test "subtree cosignature over #{label}: Go signs, Elixir verifies" do
+        {_signer, verifier, skey, _vkey} = mldsa_pair("gosub.example/pq")
 
-      subtree = %SignedNote.Subtree{
-        log_origin: "example.com/log",
-        start: unquote(start),
-        end: unquote(stop),
-        hash: <<7::256>>
-      }
+        subtree = %SignedNote.Subtree{
+          log_origin: "example.com/log",
+          start: unquote(start),
+          end: unquote(stop),
+          hash: <<7::256>>
+        }
 
-      [response] =
-        noteref("subtreesign", [skey <> "\t" <> subtree_args(subtree, unquote(timestamp))])
+        [response] =
+          noteref("subtreesign", [skey <> "\t" <> subtree_args(subtree, unquote(timestamp))])
 
-      assert ["ok", signature_b64] = String.split(response, "\t")
+        assert ["ok", signature_b64] = String.split(response, "\t")
 
-      assert {:ok, unquote(timestamp)} =
-               SignedNote.Subtree.verify(verifier, subtree, Base.decode64!(signature_b64))
-    end
-
-    test "subtree cosignature over #{label}: Elixir signs, Go verifies" do
-      {signer, _verifier, _skey, vkey} = mldsa_pair("exsub.example/pq")
-
-      subtree = %SignedNote.Subtree{
-        log_origin: "example.com/log",
-        start: unquote(start),
-        end: unquote(stop),
-        hash: <<7::256>>
-      }
-
-      assert {:ok, signature} =
-               SignedNote.Subtree.sign(signer, subtree, timestamp: unquote(timestamp))
-
-      request =
-        vkey <>
-          "\t" <> subtree_args(subtree, unquote(timestamp)) <> "\t" <> Base.encode64(signature)
-
-      assert ["ok", ""] = String.split(noteref("subtreeverify", [request]) |> hd(), "\t")
-    end
-  end
-
-  test "Go rejects an Elixir subtree cosignature applied to a different range" do
-    {signer, _verifier, _skey, vkey} = mldsa_pair("mismatch.example/pq")
-
-    signed = %SignedNote.Subtree{
-      log_origin: "example.com/log",
-      start: 1024,
-      end: 2048,
-      hash: <<7::256>>
-    }
-
-    {:ok, signature} = SignedNote.Subtree.sign(signer, signed)
-
-    for altered <- [
-          %SignedNote.Subtree{signed | end: 2049},
-          %SignedNote.Subtree{signed | start: 1025},
-          %SignedNote.Subtree{signed | log_origin: "other.example/log"},
-          %SignedNote.Subtree{signed | hash: <<8::256>>}
-        ] do
-      request = vkey <> "\t" <> subtree_args(altered, 0) <> "\t" <> Base.encode64(signature)
-      assert ["err" | _] = String.split(noteref("subtreeverify", [request]) |> hd(), "\t")
-    end
-  end
-
-  test "a checkpoint cosignature and its subtree signature are one signature" do
-    # A checkpoint is the subtree [0, size), so the note signature the
-    # reference produces must verify through the subtree API unchanged.
-    {_signer, verifier, skey, _vkey} = mldsa_pair("same.example/pq")
-    text = typed_text("example.com/log", 20_852_163)
-
-    [response] =
-      noteref("signtyped", [Enum.join(["mldsa", skey, Base.encode64(text), "0"], "\t")])
-
-    assert ["ok", note_b64] = String.split(response, "\t")
-    note = Base.decode64!(note_b64)
-
-    assert {:ok, opened} = SignedNote.open(note, [verifier])
-    [signature] = opened.signatures
-
-    {:ok, checkpoint} = SignedNote.Checkpoint.from_text(opened.text)
-    subtree = SignedNote.Subtree.from_checkpoint(checkpoint)
-
-    assert {:ok, timestamp} = SignedNote.Subtree.verify(verifier, subtree, signature.signature)
-    assert timestamp == signature.timestamp
-  end
-
-  test "Go and Elixir agree on a mixed-type cosigned checkpoint" do
-    # The workflow the cosignature types exist for: a log signs, witnesses
-    # of different types countersign, and a client verifies the lot.
-    origin = "mixed.example/log"
-    text = typed_text(origin, 99)
-
-    [{log_skey, log_vkey}] = go_genkeys(1, "unused.example/")
-    log_name = go_key_name(log_vkey)
-    text = String.replace_prefix(text, origin, log_name)
-
-    parties =
-      for {go_type, _} <- @typed_types, go_type != "rfc6962" do
-        [{skey, vkey}] = go_gentyped(1, go_type, "mixed.example/#{go_type}")
-        {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
-        {:ok, signer} = signer_from_go_skey(go_type, skey, verifier.public_key)
-        {signer, vkey}
+        assert {:ok, unquote(timestamp)} =
+                 SignedNote.Subtree.verify(verifier, subtree, Base.decode64!(signature_b64))
       end
 
-    {:ok, log} = SignedNote.Signer.from_string(log_skey)
-    {:ok, note} = SignedNote.sign(text, [log])
+      test "subtree cosignature over #{label}: Elixir signs, Go verifies" do
+        {signer, _verifier, _skey, vkey} = mldsa_pair("exsub.example/pq")
 
-    {:ok, cosigned} =
-      SignedNote.cosign(note, Enum.map(parties, &elem(&1, 0)), timestamp: 1_679_315_147)
+        subtree = %SignedNote.Subtree{
+          log_origin: "example.com/log",
+          start: unquote(start),
+          end: unquote(stop),
+          hash: <<7::256>>
+        }
 
-    vkeys = Enum.join([log_vkey | Enum.map(parties, &elem(&1, 1))], ",")
-    [response] = noteref("opentyped", [Base.encode64(cosigned) <> "\t" <> vkeys])
+        assert {:ok, signature} =
+                 SignedNote.Subtree.sign(signer, subtree, timestamp: unquote(timestamp))
 
-    assert ["ok", text_b64, names] = String.split(response, "\t")
-    assert Base.decode64!(text_b64) == text
-    assert length(String.split(names, ",")) == length(parties) + 1
+        request =
+          vkey <>
+            "\t" <> subtree_args(subtree, unquote(timestamp)) <> "\t" <> Base.encode64(signature)
 
-    verifiers =
-      Enum.map([log_vkey | Enum.map(parties, &elem(&1, 1))], fn vkey ->
-        {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
-        verifier
-      end)
+        assert ["ok", ""] = String.split(noteref("subtreeverify", [request]) |> hd(), "\t")
+      end
+    end
 
-    assert {:ok, opened} = SignedNote.open(cosigned, verifiers)
-    assert Enum.sort(opened.verified_names) == Enum.sort(String.split(names, ","))
+    test "Go rejects an Elixir subtree cosignature applied to a different range" do
+      {signer, _verifier, _skey, vkey} = mldsa_pair("mismatch.example/pq")
+
+      signed = %SignedNote.Subtree{
+        log_origin: "example.com/log",
+        start: 1024,
+        end: 2048,
+        hash: <<7::256>>
+      }
+
+      {:ok, signature} = SignedNote.Subtree.sign(signer, signed)
+
+      for altered <- [
+            %SignedNote.Subtree{signed | end: 2049},
+            %SignedNote.Subtree{signed | start: 1025},
+            %SignedNote.Subtree{signed | log_origin: "other.example/log"},
+            %SignedNote.Subtree{signed | hash: <<8::256>>}
+          ] do
+        request = vkey <> "\t" <> subtree_args(altered, 0) <> "\t" <> Base.encode64(signature)
+        assert ["err" | _] = String.split(noteref("subtreeverify", [request]) |> hd(), "\t")
+      end
+    end
+
+    test "a checkpoint cosignature and its subtree signature are one signature" do
+      # A checkpoint is the subtree [0, size), so the note signature the
+      # reference produces must verify through the subtree API unchanged.
+      {_signer, verifier, skey, _vkey} = mldsa_pair("same.example/pq")
+      text = typed_text("example.com/log", 20_852_163)
+
+      [response] =
+        noteref("signtyped", [Enum.join(["mldsa", skey, Base.encode64(text), "0"], "\t")])
+
+      assert ["ok", note_b64] = String.split(response, "\t")
+      note = Base.decode64!(note_b64)
+
+      assert {:ok, opened} = SignedNote.open(note, [verifier])
+      [signature] = opened.signatures
+
+      {:ok, checkpoint} = SignedNote.Checkpoint.from_text(opened.text)
+      subtree = SignedNote.Subtree.from_checkpoint(checkpoint)
+
+      assert {:ok, timestamp} = SignedNote.Subtree.verify(verifier, subtree, signature.signature)
+      assert timestamp == signature.timestamp
+    end
+
+    test "Go and Elixir agree on a mixed-type cosigned checkpoint" do
+      # The workflow the cosignature types exist for: a log signs, witnesses
+      # of different types countersign, and a client verifies the lot.
+      origin = "mixed.example/log"
+      text = typed_text(origin, 99)
+
+      [{log_skey, log_vkey}] = go_genkeys(1, "unused.example/")
+      log_name = go_key_name(log_vkey)
+      text = String.replace_prefix(text, origin, log_name)
+
+      parties =
+        for {go_type, _} <- @typed_types, go_type != "rfc6962" do
+          [{skey, vkey}] = go_gentyped(1, go_type, "mixed.example/#{go_type}")
+          {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
+          {:ok, signer} = signer_from_go_skey(go_type, skey, verifier.public_key)
+          {signer, vkey}
+        end
+
+      {:ok, log} = SignedNote.Signer.from_string(log_skey)
+      {:ok, note} = SignedNote.sign(text, [log])
+
+      {:ok, cosigned} =
+        SignedNote.cosign(note, Enum.map(parties, &elem(&1, 0)), timestamp: 1_679_315_147)
+
+      vkeys = Enum.join([log_vkey | Enum.map(parties, &elem(&1, 1))], ",")
+      [response] = noteref("opentyped", [Base.encode64(cosigned) <> "\t" <> vkeys])
+
+      assert ["ok", text_b64, names] = String.split(response, "\t")
+      assert Base.decode64!(text_b64) == text
+      assert length(String.split(names, ",")) == length(parties) + 1
+
+      verifiers =
+        Enum.map([log_vkey | Enum.map(parties, &elem(&1, 1))], fn vkey ->
+          {:ok, verifier} = SignedNote.Verifier.from_string(vkey)
+          verifier
+        end)
+
+      assert {:ok, opened} = SignedNote.open(cosigned, verifiers)
+      assert Enum.sort(opened.verified_names) == Enum.sort(String.split(names, ","))
+    end
   end
 end

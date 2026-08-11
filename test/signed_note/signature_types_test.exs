@@ -17,6 +17,11 @@ defmodule SignedNote.SignatureTypesTest do
     :mldsa44_cosignature_v1
   ]
 
+  # The registry above is the specification's table and is asserted whole.
+  # Everything that actually signs loops over this instead, so a build
+  # without ML-DSA-44 still exercises the other four.
+  @runnable_types Enum.filter(@all_types, &SignedNote.SignatureType.supported?/1)
+
   # The three checkpoint-shaped types must be named for the origin (0x05)
   # or sign a parseable checkpoint (0x05, 0x06), so every type is
   # exercised over the one text all five can sign.
@@ -69,7 +74,7 @@ defmodule SignedNote.SignatureTypesTest do
   end
 
   describe "every signature type signs and verifies" do
-    for type <- @all_types do
+    for type <- @runnable_types do
       test "#{type}" do
         type = unquote(type)
         signer = signer!(type)
@@ -85,7 +90,7 @@ defmodule SignedNote.SignatureTypesTest do
   end
 
   describe "every signature type rejects a tampered note" do
-    for type <- @all_types do
+    for type <- @runnable_types do
       test "#{type}" do
         signer = signer!(unquote(type))
         {:ok, note} = SignedNote.sign(@checkpoint, [signer], timestamp: @timestamp)
@@ -109,7 +114,8 @@ defmodule SignedNote.SignatureTypesTest do
           ed25519_cosignature_v1: @timestamp,
           rfc6962_sth: @timestamp,
           mldsa44_cosignature_v1: @timestamp
-        ] do
+        ],
+        SignedNote.SignatureType.supported?(type) do
       test "#{type} reports the timestamp it signed, or nil" do
         expected = unquote(expected)
         signer = signer!(unquote(type))
@@ -195,7 +201,7 @@ defmodule SignedNote.SignatureTypesTest do
     end
 
     test "every other type's key ID does depend on the name" do
-      for type <- @all_types -- [:ecdsa] do
+      for type <- @runnable_types -- [:ecdsa] do
         signer = signer!(type, "one.example/k")
 
         {:ok, renamed} =
@@ -207,7 +213,7 @@ defmodule SignedNote.SignatureTypesTest do
   end
 
   describe "vkey and private key strings" do
-    for type <- @all_types do
+    for type <- @runnable_types do
       test "#{type} round-trips" do
         signer = signer!(unquote(type))
         verifier = Signer.verifier(signer)
@@ -220,7 +226,7 @@ defmodule SignedNote.SignatureTypesTest do
     end
 
     test "a vkey's embedded key ID is checked against the key for every type" do
-      for type <- @all_types do
+      for type <- @runnable_types do
         verifier = signer!(type) |> Signer.verifier()
         [name, id, material] = String.split(Verifier.to_string(verifier), "+", parts: 3)
         tampered = Enum.join([name, flip_hex(id), material], "+")
@@ -322,6 +328,7 @@ defmodule SignedNote.SignatureTypesTest do
       assert error.message =~ "extension"
     end
 
+    @tag :mldsa44
     test "0x06 accepts extension lines, which it does not sign over" do
       signer = signer!(:mldsa44_cosignature_v1)
       with_extension = @checkpoint <> "extension line\n"
@@ -331,6 +338,7 @@ defmodule SignedNote.SignatureTypesTest do
       assert opened.text == with_extension
     end
 
+    @tag :mldsa44
     test "0x06 signs the origin and size, so a rewritten checkpoint fails" do
       signer = signer!(:mldsa44_cosignature_v1)
       {:ok, note} = SignedNote.sign(@checkpoint, [signer], timestamp: @timestamp)
@@ -355,6 +363,8 @@ defmodule SignedNote.SignatureTypesTest do
   end
 
   describe "ML-DSA-44 needs its public key" do
+    @describetag :mldsa44
+
     # A real FIPS 204 seed and the public key it expands to, from
     # filippo.io/mldsa. OTP's crypto signs from a seed but will not expand
     # one, so the pair cannot be produced here — and the round-trip below
@@ -442,6 +452,7 @@ defmodule SignedNote.SignatureTypesTest do
   end
 
   describe "mixed-type notes" do
+    @tag :mldsa44
     test "a log signature and witness cosignatures of three types verify together" do
       log = signer!(:ed25519)
 
@@ -468,6 +479,7 @@ defmodule SignedNote.SignatureTypesTest do
       assert String.starts_with?(cosigned, note)
     end
 
+    @tag :mldsa44
     test "a client that knows only one witness still verifies, ignoring the rest" do
       log = signer!(:ed25519)
       witness = signer!(:mldsa44_cosignature_v1, "witness.example/pq")

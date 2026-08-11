@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.1 — 2026-08-11
+
+### Fixed
+
+  * ML-DSA-44 (`0x06`) needs OpenSSL 3.5 or later under OTP's crypto, and
+    where that is missing — Ubuntu 24.04 ships OpenSSL 3.0 — the crypto
+    call raised `ErlangError` instead of returning an error. That reached
+    `open/2`, which must never raise. Keys of that type are now refused
+    with `:unsupported_algorithm` where they are built, and verifying such
+    a signature fails closed. The other four types were never affected.
+  * `SignedNote.SignatureType.supported?/1` reports whether this build can
+    use a type, so a caller can find out before it tries.
+
 ## v1.1.0 — 2026-08-06
 
 Every signature type the C2SP specifications assign a format to, for both

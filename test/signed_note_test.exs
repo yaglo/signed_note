@@ -5,7 +5,10 @@ defmodule SignedNoteTest do
   doctest SignedNote.Signer
   doctest SignedNote.SignatureType
   doctest SignedNote.Checkpoint
-  doctest SignedNote.Subtree
+
+  if SignedNote.SignatureType.supported?(:mldsa44_cosignature_v1) do
+    doctest SignedNote.Subtree
+  end
 
   # The worked example from the C2SP signed-note specification.
   @spec_vkey "example.com/foo+530d903a+AekyeRrm56hApGFkyQR4ZCbV54Id2LKaANYcrnKv3U2k"
