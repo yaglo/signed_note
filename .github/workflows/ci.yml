@@ -11,15 +11,27 @@ permissions:
 
 jobs:
   test:
-    name: OTP ${{ matrix.otp }} / Elixir ${{ matrix.elixir }}
-    runs-on: ubuntu-24.04
+    name: ${{ matrix.os }} / OTP ${{ matrix.otp }} / Elixir ${{ matrix.elixir }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - otp: "29"
+          # OpenSSL 3.0, so ML-DSA-44 is unavailable and the library has
+          # to refuse it cleanly. This is the common deployment today, and
+          # the linters run here because the image is stable.
+          - os: ubuntu-24.04
+            otp: "29"
             elixir: "1.20.2"
             lint: true
+
+          # OpenSSL 3.5, so every signature type is reachable and the
+          # coverage gate means something. The image is in preview, so
+          # nothing but coverage depends on it.
+          - os: ubuntu-26.04
+            otp: "29"
+            elixir: "1.20.2"
+            cover: true
     steps:
       - uses: actions/checkout@v4
 
@@ -37,26 +49,35 @@ jobs:
           path: |
             deps
             _build
-          key: mix-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
-          restore-keys: mix-${{ matrix.otp }}-${{ matrix.elixir }}-
+          key: mix-${{ matrix.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ matrix.os }}-${{ matrix.otp }}-${{ matrix.elixir }}-
 
       - run: mix deps.get
 
       - run: mix compile --warnings-as-errors
 
+      # Reported so the two jobs are visibly testing different builds, and
+      # so a silent change of runner image is obvious in the log.
+      - name: Report crypto capabilities
+        run: |
+          openssl version
+          mix run --no-start -e '
+            IO.puts("ML-DSA-44 available: #{SignedNote.SignatureType.supported?(:mldsa44_cosignature_v1)}")'
+
       - run: mix test --include go_differential
 
-      # The coverage gate needs every signature type reachable, and
-      # ML-DSA-44 needs OpenSSL 3.5 or later under OTP's crypto. The
-      # runner image ships OpenSSL 3.0, so the gate is enforced only where
-      # the primitive is present, and says so loudly where it is not.
-      - if: matrix.lint
+      # Coverage needs every signature type reachable, so it runs only on
+      # the job that has them. Asserting the capability first keeps the
+      # gate from silently lapsing if that image ever loses OpenSSL 3.5.
+      - if: matrix.cover
+        name: Coverage
         run: |
-          if mix run --no-start -e 'System.halt(if SignedNote.SignatureType.supported?(:mldsa44_cosignature_v1), do: 0, else: 1)'; then
-            mix test --cover
-          else
-            echo "::warning title=Coverage gate not enforced::ML-DSA-44 needs OpenSSL 3.5; this runner has $(openssl version | cut -d' ' -f1-2). The suite ran without those tests."
-          fi
+          mix run --no-start -e '
+            unless SignedNote.SignatureType.supported?(:mldsa44_cosignature_v1) do
+              IO.puts(:stderr, "ML-DSA-44 is unavailable here, so the coverage gate cannot be enforced")
+              System.halt(1)
+            end'
+          mix test --cover
 
       - if: matrix.lint && startsWith(github.ref, 'refs/tags/v')
         run: SIGNED_NOTE_FUZZ_N=100000 mix test --only go_differential
