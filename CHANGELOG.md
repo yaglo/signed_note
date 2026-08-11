@@ -1,19 +1,6 @@
 # Changelog
 
-## v1.1.1 — 2026-08-11
-
-### Fixed
-
-  * ML-DSA-44 (`0x06`) needs OpenSSL 3.5 or later under OTP's crypto, and
-    where that is missing — Ubuntu 24.04 ships OpenSSL 3.0 — the crypto
-    call raised `ErlangError` instead of returning an error. That reached
-    `open/2`, which must never raise. Keys of that type are now refused
-    with `:unsupported_algorithm` where they are built, and verifying such
-    a signature fails closed. The other four types were never affected.
-  * `SignedNote.SignatureType.supported?/1` reports whether this build can
-    use a type, so a caller can find out before it tries.
-
-## v1.1.0 — 2026-08-06
+## v1.1.0 — 2026-08-11
 
 Every signature type the C2SP specifications assign a format to, for both
 signing and verification. v1.0.0 implemented Ed25519 alone, so all of this
@@ -42,6 +29,18 @@ is additive.
   * `SignedNote.Verifier.new/3` and `SignedNote.Signer.new/4` build keys
     of any type; `from_ed25519/2` and `from_ed25519_seed/2` remain as the
     Ed25519 shorthands.
+  * `SignedNote.SignatureType.supported?/1` reports whether this build can
+    use a type.
+
+### ML-DSA-44 needs OpenSSL 3.5
+
+The other four types rest on primitives OTP's crypto has always had.
+ML-DSA-44 (`0x06`) needs OpenSSL 3.5 or later underneath it, which many
+current systems do not have — Ubuntu 24.04 ships OpenSSL 3.0. Where it is
+missing, OTP raises rather than returning an error, so keys of that type
+are refused with `:unsupported_algorithm` where they are built and
+verifying such a signature fails closed; `open/2` never raises either way.
+Nothing else is affected.
 
 ### Changed
 

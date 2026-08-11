@@ -1,7 +1,7 @@
 defmodule SignedNote.MixProject do
   use Mix.Project
 
-  @version "1.1.1"
+  @version "1.1.0"
   @source_url "https://github.com/yaglo/signed_note"
 
   def project do
